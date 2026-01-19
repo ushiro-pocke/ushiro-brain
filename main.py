@@ -19,10 +19,9 @@ app.add_middleware(
 )
 
 # --- 🧠 解析エンジンの準備 ---
-# Tokenizerを初期化
-try:
-    tokenizer_obj = dictionary.Dictionary().create()
-    mode = tokenizer.Tokenizer.SplitMode.C
+# core を small に書き換えます
+tokenizer_obj = dictionary.Dictionary(dict="small").create()
+mode = tokenizer.Tokenizer.SplitMode.C
 except Exception as e:
     print(f"Dictionary Load Error: {e}")
     # フォールバック（万が一辞書が読み込めない場合）
@@ -173,3 +172,4 @@ def humanize_text(req: TextRequest):
 @app.get("/")
 def read_root():
     return {"status": f"Ushiro-Brain V5 (Grammar Fixer). Loaded {len(NOUN_DICT)} words."}
+
