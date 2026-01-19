@@ -19,9 +19,9 @@ app.add_middleware(
 )
 
 # --- 🧠 解析エンジンの準備 ---
-# エラーが出にくいよう、一番シンプルな記述に変えました
-tokenizer_obj = dictionary.Dictionary().create()
-mode = tokenizer.Tokenizer.SplitMode.C 
+# ここに "small" と入れるのがポイントです！
+tokenizer_obj = dictionary.Dictionary(dict="small").create()
+mode = tokenizer.Tokenizer.SplitMode.C
 
 # --- 📚 辞書データの構築 ---
 NOUN_DICT = {}
@@ -103,3 +103,4 @@ def humanize_text(req: TextRequest):
 @app.get("/")
 def read_root():
     return {"status": "Ushiro-Brain V5 Stable"}
+
