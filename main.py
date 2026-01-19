@@ -19,27 +19,30 @@ app.add_middleware(
 )
 
 # --- 🧠 解析エンジンの準備 ---
-tokenizer_obj = dictionary.Dictionary().create()
-mode = tokenizer.Tokenizer.SplitMode.C 
+# Tokenizerを初期化
+try:
+    tokenizer_obj = dictionary.Dictionary().create()
+    mode = tokenizer.Tokenizer.SplitMode.C
+except Exception as e:
+    print(f"Dictionary Load Error: {e}")
+    # フォールバック（万が一辞書が読み込めない場合）
+    tokenizer_obj = None
 
 # --- 📚 辞書データの構築 ---
 NOUN_DICT = {}
 
-# 1. 起動時にCSVファイルを読み込む
-# GitHubに 'dict.csv' があればそれを読み込みます
 if os.path.exists("dict.csv"):
     with open("dict.csv", mode="r", encoding="utf-8") as f:
         reader = csv.reader(f)
         for row in reader:
             if len(row) >= 2:
-                key = row[0]       # 1列目が「元の言葉」
-                candidates = row[1:] # 2列目以降が「変換候補」
-                # 空文字などを除去して登録
+                key = row[0]
+                candidates = row[1:]
                 NOUN_DICT[key] = [c for c in candidates if c.strip()]
 else:
-    print("Warning: dict.csv not found. Using empty dict.")
+    print("Warning: dict.csv not found.")
 
-# --- 🗣 口癖・フィラー ---
+# --- 🗣 フィラー（ノイズ） ---
 FILLERS = [
     "えーっと、", "なんか、", "正直、", "ぶっちゃけ、", "ていうか、",
     "実は、", "個人的には、", "なんというか、", "そういえば、",
@@ -58,6 +61,45 @@ ENDING_PATTERNS = [
     (r"ました。$", ["ましたよ。", "たんです。", "たね。", "ちゃいました。"]),
 ]
 
+# --- 🏥 文法整形ルール（ここが重要！） ---
+# 正規表現を使って「不自然な接続」を「自然な口語」に直します
+GRAMMAR_FIXES = [
+    # 1. 「こと」＋「する」問題の解消
+    # 例: 考えることする → 考えることにする / 考えちゃう
+    (r"こと(する|します|した|して)", r"ことに\1"), 
+    
+    # 2. 「動詞の辞書形」＋「する」問題（サ変接続のバグ修正）
+    # 例: 使うする → 使う / 使うね / 使っちゃう
+    # ※ 文脈によるが、単純に「する」を取るか、口語的な助動詞に変える
+    (r"([うくすつぬむる])する", r"\1"),        # 使うする -> 使う
+    (r"([うくすつぬむる])します", r"\1ます"),  # 使うします -> 使うます(後で修正) -> 使います
+    (r"([うくすつぬむる])した", r"\1た"),      # 使うした -> 使うた(後で修正) -> 使った
+    
+    # 3. 助詞「の」＋ 動詞 の不自然さ
+    # 例: 機能の使う → 機能を使う
+    (r"の([うくすつぬむる])", r"を\1"),
+    
+    # 4. 過去形の活用パッチ（五段活用・一段活用を無理やり直す）
+    # 「使うた」→「使った」、「書くた」→「書いた」など
+    (r"うた", r"った"), (r"つた", r"った"), (r"るた", r"た"),
+    (r"くた", r"いた"), (r"ぐた", r"いだ"), (r"むた", r"んだ"),
+    (r"ぶた", r"んだ"), (r"ぬた", r"んだ"), (r"すた", r"した"),
+    
+    # 5. 丁寧語「ます」の活用パッチ
+    # 「使うます」→「使います」
+    (r"うます", r"います"), (r"つます", r"ちます"), (r"るます", r"ます"),
+    (r"くます", r"きます"), (r"ぐます", r"ぎます"), (r"むます", r"みます"),
+    (r"ぶます", r"びます"), (r"ぬます", r"にます"), (r"すます", r"します"),
+
+    # 6. 「こと」の重複削除
+    (r"ことこと", r"こと"),
+    
+    # 7. 「てにをは」の微調整（AI語→口語）
+    (r"について", r"のこと"),
+    (r"に対して", r"に"),
+    (r"において", r"で"),
+]
+
 class TextRequest(BaseModel):
     text: str
     noise_level: float = 0.5
@@ -69,20 +111,26 @@ def humanize_text(req: TextRequest):
     noise_lv = req.noise_level
     human_lv = req.human_level
     
-    # 1. SudachiPyで形態素解析
-    tokens = tokenizer_obj.tokenize(text, mode)
+    # 1. 形態素解析（もし失敗したら原文をそのまま使う）
+    if tokenizer_obj:
+        tokens = tokenizer_obj.tokenize(text, mode)
+    else:
+        # 辞書ロード失敗時の緊急避難（空白で区切るなど最低限の処理）
+        return {"result": text}
     
     result_buffer = ""
     
     for token in tokens:
         word = token.surface() # 単語
         
-        # --- A. 辞書変換 (CSVベース) ---
+        # --- A. 辞書変換 ---
+        # 確率判定: Human Levelが高いほど置換しやすい
         if word in NOUN_DICT and random.random() < (human_lv + 0.1):
             candidates = NOUN_DICT[word]
             word = random.choice(candidates)
             
         # --- B. ノイズ注入 ---
+        # 文頭や句点のあとにフィラーを入れる確率
         if random.random() < (noise_lv * 0.05):
             word = random.choice(FILLERS) + word
 
@@ -95,16 +143,25 @@ def humanize_text(req: TextRequest):
     final_sentences = []
     for s in sentences:
         if not s: continue
+        
+        # 文末変換
+        replaced = False
         for pattern, candidates in ENDING_PATTERNS:
             if re.search(pattern, s) and random.random() < (human_lv + 0.2):
                 replacement = random.choice(candidates)
                 s = re.sub(pattern, replacement, s)
+                replaced = True
                 break
+        
         final_sentences.append(s)
         
     processed_text = "。".join(final_sentences)
     
-    # --- D. 仕上げ ---
+    # --- D. 文法整形手術（ここを実行！） ---
+    for pattern, replacement in GRAMMAR_FIXES:
+        processed_text = re.sub(pattern, replacement, processed_text)
+    
+    # --- E. 仕上げ ---
     processed_text = processed_text.replace("。。", "。")
     processed_text = processed_text.replace("！！", "！")
     
@@ -115,5 +172,4 @@ def humanize_text(req: TextRequest):
 
 @app.get("/")
 def read_root():
-    # 辞書が何語入っているか確認用
-    return {"status": f"Ushiro-Brain V4 with CSV. Loaded {len(NOUN_DICT)} words."}
+    return {"status": f"Ushiro-Brain V5 (Grammar Fixer). Loaded {len(NOUN_DICT)} words."}
